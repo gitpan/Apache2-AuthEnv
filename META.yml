@@ -1,0 +1,21 @@
+# http://module-build.sourceforge.net/META-spec.html
+#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
+name:         Apache2-AuthEnv
+version:      1.0
+version_from: lib/Apache2/AuthEnv.pm
+installdirs:  site
+requires:
+    Apache2::Access:               1
+    Apache2::Const:                1
+    Apache2::Log:                  1
+    Apache2::Module:               1
+    Apache2::RequestRec:           1
+    Apache2::RequestUtil:          1
+    Apache2::ServerUtil:           1
+    Carp:                          1
+    Data::Dumper:                  1
+    mod_perl2:                     2
+    ModPerl::Util:                 1
+
+distribution_type: module
+generated_by: ExtUtils::MakeMaker version 6.30

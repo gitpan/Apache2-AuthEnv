@@ -1,0 +1,11 @@
+Revision history for Perl extension Apache2::AuthEnv
+
+1.0 May 2008
+	- Added config merging and AuthEnv*Split* directives.
+
+0.9 April 2008
+	- Put into production use with slight modification.
+
+0.8 March 2008
+	- Initial module built and tested
+
