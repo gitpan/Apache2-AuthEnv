@@ -1,5 +1,11 @@
 Revision history for Perl extension Apache2::AuthEnv
 
+1.1 June 2008
+	- Changed AuthEnvVar to AuthEnvUser.
+	- Added AuthEnvChange directive.
+        - Changes internals to respect order of AuthEnvSet and
+          AuthEnvChange directives.
+
 1.0 May 2008
 	- Added config merging and AuthEnv*Split* directives.
 

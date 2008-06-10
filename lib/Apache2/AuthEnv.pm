@@ -12,10 +12,12 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
 
  ### In httpd.conf or .htaccess: ################
  # Set the remote user and trigger the auth* stages
- AuthEnvVar %{REMOTE_ADDR}@%{SOME_ENV_VAR}
+ AuthEnvUser %{REMOTE_ADDR}@%{SOME_ENV_VAR}
 
  # Set extra environment variables.
  AuthEnvSet	HTTP_AE_SERVER	%{SERVER_ADDR}:%{SERVER_PORT}
+ AuthEnvChange	HTTP_AE_SERVER	s/:/!/g
+ AuthEnvChange	HTTP_AE_SERVER	tr/a-z/A-Z/
 
  # Allow and Deny access based on environment.
  # The default is to deny access.
@@ -33,7 +35,7 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
 
 B<Apache2::AuthEnv> allows you to promote a string composed of CGI
 environment variables to act as an authenticated user. The format is
-set via the AuthEnvVar command and the result is placed in the
+set via the AuthEnvUser command and the result is placed in the
 environment variable B<REMOTE_USER>.
 
 This module is for use only when another Apache module pre-authenticates
@@ -41,12 +43,12 @@ and pre-authorises a user but does not provide authentication nor
 authorisation controls within Apache.
 
 This module, once loaded, is triggered by the Apache directive
-I<AuthEnvVar> setting a format from the environment for the remote
+I<AuthEnvUser> setting a format from the environment for the remote
 user name. Authorisation is controlled by I<AuthEnvAllow*> and
 I<AuthEnvDeny*> directives. The default is to deny authorisation
 to everyone.
 
-  AuthEnvVar		%{HTTP_SSO_USER}@%{HTTP_SSO_ORG}
+  AuthEnvUser		%{HTTP_SSO_USER}@%{HTTP_SSO_ORG}
   AuthEnvAllowUser	fred@ORG
 
 Such a system is Computer Asscoiates' SiteMinder (c) Single Sign On
@@ -56,18 +58,18 @@ local web server. SiteMinder sets various environment variables
 including HTTP_SM_USER and HTTP_SM_AUTHDIRNAME. So a reasonable
 setting would be
 
-  AuthEnvVar		%{HTTP_SM_USER}@%{HTTP_SM_AUTHDIRNAME}
+  AuthEnvUser		%{HTTP_SM_USER}@%{HTTP_SM_AUTHDIRNAME}
   AuthEnvAllowUser	fred@ORG
 
 Another example is
-  AuthEnvVar		%{HTTP_UI_PRINCIPAL_NAME}
+  AuthEnvUser		%{HTTP_UI_PRINCIPAL_NAME}
   AuthEnvAllowUser	fred@ORG.org
   AuthEnvAllow		%{HTTP_UI_DEPARTMENT} sales
 
 For nested directives, configurations are inherited from one
-configuration file to the next. I<AuthEnvVar> directives overwrite each
+configuration file to the next. I<AuthEnvUser> directives overwrite each
 other as do collections of I<AuthEnvAllow*> rules. Each individual
-AuthEnvSet, unless overwriten, is inherited.
+AuthEnvSet and AuthEnvChange directive, unless overwriten, is inherited.
 
 The default denial code returned to the browser is FORBIDDEN.
 The directive I<AuthEnvDenial> can be used to change the return code.
@@ -106,7 +108,7 @@ PerlModule Apache2::AuthEnv
 
 =back
 
-=item * AuthEnvVar <format>
+=item * AuthEnvUser <format>
 
 This turns on the authentication and authorisation stages and sets the
 format for the remote user name, which is filled in during
@@ -115,6 +117,11 @@ authentication.
 =item * AuthEnvSet <variable> <format>
 
 This sets the specified environment variable using the sepcified format.
+
+=item * AuthEnvSet <variable> <perl-substitution>
+
+This changes the specified environment variable according to the following
+Perl substitution. Modifications to REMOTE_USER are allowed.
 
 =item * AuthEnvAllowUser <user>
 
@@ -188,10 +195,12 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.0';
+$VERSION = '1.1';
 
 use Carp;
 use Data::Dumper;
+
+use Safe;
 
 use ModPerl::Util;
 use Apache2::Module;
@@ -212,8 +221,12 @@ die "The module mod_perl 2.0 is required!" unless
 ###########################################################
 my @directives = (
 	{
+		name	=> 'AuthEnvUser',
+		errmsg	=> 'AuthEnvUser EnvVarFrormat',
+	},
+	{
 		name	=> 'AuthEnvVar',
-		errmsg	=> 'AuthEnvAllow EnvVarFrormat',
+		errmsg	=> 'AuthEnvVar EnvVarFrormat',
 	},
 	{
 		name		=> 'AuthEnvAllowUser',
@@ -271,6 +284,11 @@ my @directives = (
 		errmsg		=> 'AuthEnvSet EnvVar Format',
 	},
 	{
+		name		=> 'AuthEnvChange',
+		args_how	=> Apache2::Const::TAKE2,
+		errmsg		=> 'AuthEnvChange EnvVar <subsitution>'
+	},
+	{
 		name		=> 'AuthEnvDenial',
 		args_how	=> Apache2::Const::TAKE1,
 		errmsg		=> 'AuthEnvDenial <UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN>'
@@ -298,7 +316,7 @@ sub new
 
 # Set the environment variable to use for authentication
 # and set the system to authenticate and authorise.
-sub AuthEnvVar
+sub AuthEnvUser
 {
 	my ($cfg, $parms, $fmt, @args) = @_;
 
@@ -314,19 +332,22 @@ sub AuthEnvVar
 	# Check that the format contains something to expand.
 	unless ($fmt =~ /%{\w+}/)
 	{
-		$r->server->log_error("AuthEnvVar format has no expansion! AuthEnv cancelled for ", $r->uri);
+		$r->server->log_error("AuthEnvUser format has no expansion! AuthEnv cancelled for ", $r->uri);
 		return Apache2::Const::HTTP_FORBIDDEN;
 	}
 
 	# Save value for user name format.
-	$cfg->{AuthEnvVar} = $fmt;
+	$cfg->{AuthEnvUser} = $fmt;
+
+	# Make sure the the user gets set later.
+	push @{$cfg->{set}}, ['set', 'REMOTE_USER', $fmt];
 
 	# Initialise the authorise rule list.
 	$cfg->{authorise} = ();
 
 	1;
 }
-
+sub AuthEnvVar { AuthEnvUser(@_); }
 
 # The @authorise array contains arrays of four elements:
 #	the environment format string,
@@ -397,8 +418,13 @@ sub AuthEnvDenySplitMatch
 sub AuthEnvSet
 {
 	my ($cfg, $parms, $var, $fmt) = @_;
+	push @{$cfg->{set}}, ['set', $var, $fmt];
+}
 
-	push @{$cfg->{set}}, [$var, $fmt];
+sub AuthEnvChange
+{
+	my ($cfg, $parms, $var, $change) = @_;
+	push @{$cfg->{set}}, ['change', $var, $change];
 }
 
 sub AuthEnvDenial
@@ -479,45 +505,75 @@ sub authenticate
 		$r->server->log_error("Wrong authentication Type ", $r->auth_type);
 		return Apache2::Const::HTTP_UNAUTHORIZED;
 	}
-	unless (defined $cfg->{AuthEnvVar})
+	unless (defined $cfg->{AuthEnvUser})
 	{
-		$r->server->log_error("AuthEnvVar not used! ", $r->auth_type);
+		$r->server->log_error("AuthEnvUser not used! ", $r->auth_type);
 		return Apache2::Const::HTTP_UNAUTHORIZED;
 	}
-
-	# Set AuthEnvVar value. Depreciated!
-	#my $AuthEnvVar = $r->dir_config('AuthEnvVar') || $cfg->{AuthEnvVar};
 
 	# Import CGI environment.
 	$r->subprocess_env unless $r->is_perl_option_enabled('SetupEnv');
 
-        # expand $AuthEnvVar format; fail if a variable doesn't
+        # expand $AuthEnvUser format; fail if a variable doesn't
         # not exist.
-	my $user = $cfg->{AuthEnvVar};
-	my $fail = 0; # count non-existant variables.
-	$user =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $fail++)/gxe;
 
-	# Failure.
-	return Apache2::Const::HTTP_UNAUTHORIZED if $fail;
+	# Check that AuthEnvUser is set.
+	return Apache2::Const::HTTP_UNAUTHORIZED unless exists $cfg->{AuthEnvUser};
+
+	# Set the AE version environment.
+	$r->subprocess_env('HTTP_AE_VERSION', $VERSION);
+
+	# Set the environment and the REMOTE_USER along the way.
+	for my $s (@{$cfg->{set}})
+	{
+		my ($act, $v, $f) = @$s;
+
+		# Set an environment variable.
+		if ($act eq 'set')
+		{
+			my $fail = 0; # count non-existant variables.
+			#$f =~ s/%{(\w+)}/$r->subprocess_env($1)/gxe;
+			$f =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ($fail++))/gxe;
+
+			# something wasn't defined.
+			return Apache2::Const::HTTP_UNAUTHORIZED if $fail;
+
+			$r->subprocess_env($v, $f);
+		}
+		# Change an environment variable.
+		elsif ($act eq 'change')
+		{
+			my $val = $r->subprocess_env($v);
+
+			# Run the modification in a safe environment.
+			my $cpt = new Safe;
+			${$cpt->varglob('val')} = $val;
+			$cpt->reval("\$val =~ $f");
+
+			if ($@)
+			{
+				# failure to run.
+				$r->server->log_error("change '$f' failed ($@) ", $r->uri);
+				return Apache2::Const::HTTP_UNAUTHORIZED;
+			}
+			else
+			{
+				# success.
+				$r->subprocess_env($v,${$cpt->varglob('val')});
+			}
+		}
+
+		# Set the authenticated user as we go.
+		$r->user($r->subprocess_env('REMOTE_USER'))
+				if ($v eq 'REMOTE_USER');
+	}
+
+	# Check that the user is real.
+	my $user = $r->user();
 	return Apache2::Const::HTTP_UNAUTHORIZED unless defined $user;
 	return Apache2::Const::HTTP_UNAUTHORIZED if ($user eq '');
 
-	# Success! User authenticated
-
-	# Set REMOTE_USER, etc..
-	$r->subprocess_env('REMOTE_USER', $user);
-	$r->user($user);
-
-	# Set the environment.
-	$r->subprocess_env('HTTP_AE_VERSION', $VERSION);
-	for my $s (@{$cfg->{set}})
-	{
-		my ($v, $f) = @$s;
-		$f =~ s/%{(\w+)}/$r->subprocess_env($1)/gxe;
-		$r->subprocess_env($v, $f);
-	}
-
-	# succeed.
+	# Success.
 	return Apache2::Const::OK;
 }
 
