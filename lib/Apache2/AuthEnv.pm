@@ -15,7 +15,7 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  AuthEnvUser %{REMOTE_ADDR}@%{SOME_ENV_VAR}
 
  # Set extra environment variables.
- AuthEnvSet	HTTP_AE_SERVER	%{SERVER_ADDR}:%{SERVER_PORT}
+ AuthEnvSet	HTTP_AE_SERVER	%{SERVER_ADDR:unknown}:%{SERVER_PORT:unknown}
  AuthEnvChange	HTTP_AE_SERVER	s/:/!/g
  AuthEnvChange	HTTP_AE_SERVER	tr/a-z/A-Z/
 
@@ -28,6 +28,7 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  AuthEnvDeny		%{REMOTE_ADDR}		192.168.2.3
  AuthEnvDenyMatch	%{HTTP_USER_AGENT}	Fedora
  AuthEnvAllow		%{SERVER_PORT} 80
+ AuthEnvAllowSplit	%{HTTP_MEMBEROF}   '\^' 'CN=....'
 
  AuthEnvDenial		UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN
 
@@ -77,6 +78,21 @@ For example,
 
   AuthEnvDenial		NOT_FOUND
 
+=head1 FORMAT
+
+The substitution format is composed of strings of characters and 
+variable substitutions starting with '%{' and ending in '}'.
+The substitution are either 
+%{ENVIRONMENT_VARIABLE_NAME}
+or
+%{ENVIRONMENT_VARIABLE_NAME:default}.
+In the former case, the environment variable is simply substituted. In
+the latter, if the environment variable doesn't exist then the default
+string following the colon is used.
+
+To use formats with spaces in the .htaccess file, enclose the format in
+double quotes.
+
 =head1 METHODS
 
 =over 4
@@ -96,17 +112,21 @@ directive in .htaccess and httpd.conf files.
 This is the method used as augument to the the PerlAuthzHandler
 directive in .htaccess and httpd.conf files.
 
+=back
+
 =head1 APACHE DIRECTIVES
 
 In the Apache configuration file httpd.conf, the module must be loaded
 
-=over 4
+=over 2
 
 PerlOptions +GlobalRequest
 
 PerlModule Apache2::AuthEnv
 
 =back
+
+=over 4
 
 =item * AuthEnvUser <format>
 
@@ -160,10 +180,16 @@ repression and the others require exact matches.
 This is useful for environment variables that are really lists
 of values delimited with a specific value.
 
+Note that the <split> string is a regular expression and needs to be
+escaped appropiately; e.g. split on '\^' not on '^' as the latter just
+splits on the beginning of the string and is probably not what you want.
+
 =item * AuthEnvDenial	UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN
 
 This directive sets the HTTP denial code returned to the
 browser if authorisation fails. The default is FORBIDDEN.
+
+=back
 
 =head1 AUTHOR
 
@@ -195,7 +221,7 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.1';
+$VERSION = '1.2';
 
 use Carp;
 use Data::Dumper;
@@ -330,7 +356,7 @@ sub AuthEnvUser
 	]);
 
 	# Check that the format contains something to expand.
-	unless ($fmt =~ /%{\w+}/)
+	unless ($fmt =~ /%{\w+(:\w*)?}/)
 	{
 		$r->server->log_error("AuthEnvUser format has no expansion! AuthEnv cancelled for ", $r->uri);
 		return Apache2::Const::HTTP_FORBIDDEN;
@@ -532,8 +558,17 @@ sub authenticate
 		if ($act eq 'set')
 		{
 			my $fail = 0; # count non-existant variables.
+
+			#$r->server->log_error($r->uri, ": change '$f'");
+
 			#$f =~ s/%{(\w+)}/$r->subprocess_env($1)/gxe;
-			$f =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ($fail++))/gxe;
+			#$f =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ($fail++))/gxe;
+			#$f =~ s/%{(\w+:(\w+))}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $2)/gxe;
+			$f =~ s/%{(\w+)(:(\w*))?}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ( defined($3) ? $3 : ($fail++)))/gxe;
+			#$r->server->log_error($r->uri, ": 1='$1'");
+			#$r->server->log_error($r->uri, ": 2='$2'");
+			#$r->server->log_error($r->uri, ": 3='$3'");
+			#$r->server->log_error($r->uri, ": to     '$f'");
 
 			# something wasn't defined.
 			return Apache2::Const::HTTP_UNAUTHORIZED if $fail;
@@ -592,7 +627,8 @@ sub allowed
 		my $fail = 0; # count non-existant variables.
 
 		# Substitute.
-		$val =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $fail++)/gxe;
+		#$val =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $fail++)/gxe;
+		$val =~ s/%{(\w+)(:(\w*))?}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ( defined($3) ? $3 : ($fail++)))/gxe;
 
 		# Fail if this contains a non-existant environment variable.
 		return 0 if $fail;
@@ -613,7 +649,12 @@ sub allowed
 				: ($v =~ m/$regex/);
 
 
-			return $allow if $match;
+			#return $allow if $match;
+			if ($match)
+			{
+				#debug $r, "match '$v' against '$regex' returns '$allow'\n";
+				return $allow;
+			}
 		}
 	}
 
