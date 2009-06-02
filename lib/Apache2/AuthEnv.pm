@@ -14,6 +14,10 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  # Set the remote user and trigger the auth* stages
  AuthEnvUser %{REMOTE_ADDR}@%{SOME_ENV_VAR}
 
+ # Also possible is setting the remote user from a list 
+ # of alternative environment variables or a default value.
+ AuthEnvUser %{HTTP_XX_USER|HTTP_YY_USER:anon}
+
  # Set extra environment variables.
  AuthEnvSet	HTTP_AE_SERVER	%{SERVER_ADDR:unknown}:%{SERVER_PORT:unknown}
  AuthEnvChange	HTTP_AE_SERVER	s/:/!/g
@@ -29,6 +33,9 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  AuthEnvDenyMatch	%{HTTP_USER_AGENT}	Fedora
  AuthEnvAllow		%{SERVER_PORT} 80
  AuthEnvAllowSplit	%{HTTP_MEMBEROF}   '\^' 'CN=....'
+
+ AuthEnvAllowAll
+ AuthEnvDenyAll
 
  AuthEnvDenial		UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN
 
@@ -67,6 +74,14 @@ Another example is
   AuthEnvAllowUser	fred@ORG.org
   AuthEnvAllow		%{HTTP_UI_DEPARTMENT} sales
 
+Some systems may take authentication information from various sources
+and provide different environment variables for each source. So you can
+list alternative variables to use.
+  AuthEnvUser		%{HTTP_SOURCE1_NAME|HTTP_SOURCE2_NAME|HTTP_SOURCE3_NAME}
+
+If nothing matches then you can set a default value (say 'anon') via 
+  AuthEnvUser		%{HTTP_SOURCE_NAME|HTTP_SOURCE2_NAME:anon}
+
 For nested directives, configurations are inherited from one
 configuration file to the next. I<AuthEnvUser> directives overwrite each
 other as do collections of I<AuthEnvAllow*> rules. Each individual
@@ -82,13 +97,23 @@ For example,
 
 The substitution format is composed of strings of characters and 
 variable substitutions starting with '%{' and ending in '}'.
-The substitution are either 
-%{ENVIRONMENT_VARIABLE_NAME}
-or
-%{ENVIRONMENT_VARIABLE_NAME:default}.
-In the former case, the environment variable is simply substituted. In
-the latter, if the environment variable doesn't exist then the default
-string following the colon is used.
+Substitutions are of the following formats:
+
+=over 2
+
+=item * %{ENVIRONMENT_VARIABLE_NAME},
+
+=item * %{ENVIRONMENT_VARIABLE_NAME1|ENVIRONMENT_VARIABLE_NAME2|....}
+
+=item * %{ENVIRONMENT_VARIABLE_NAME:default}.
+
+=back
+
+In the first case, the value of the environment variable is simply substituted. If a
+'|' separated list of variables is specified then each variable is
+checked in order, substituting the value of the first that is not empty.
+If no substitution succeeds and there is a default specified then that
+value is used instead.
 
 To use formats with spaces in the .htaccess file, enclose the format in
 double quotes.
@@ -184,6 +209,24 @@ Note that the <split> string is a regular expression and needs to be
 escaped appropiately; e.g. split on '\^' not on '^' as the latter just
 splits on the beginning of the string and is probably not what you want.
 
+=item * AuthEnvAllowFile <file>
+
+=item * AuthEnvDenyFile <file>
+
+These directives allow or deny, respectively,
+any users from the specified file.
+
+=item * AuthEnvAllowAll
+
+This directive allows any connection that hasn't been denied up to now.
+This is useful to allow all users to access the controlled area.
+
+=item * AuthEnvDenyAll
+
+This directive denies any connection that hasn't been allowed up to now.
+This is really the default action but included for completeness.
+It is useful when an area needs to be temporarily denied but the rest of the configuration needs to stay intact.
+
 =item * AuthEnvDenial	UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN
 
 This directive sets the HTTP denial code returned to the
@@ -221,7 +264,7 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.2';
+$VERSION = '1.3';
 
 use Carp;
 use Data::Dumper;
@@ -305,6 +348,26 @@ my @directives = (
 		errmsg		=> 'AuthEnvDenySplitMatch EnvVarFormat SplitRegEx RegEx',
 	},
 	{
+		name		=> 'AuthEnvAllowAll',
+		args_how	=> Apache2::Const::NO_ARGS,
+		errmsg		=> 'AuthEnvAllowAll',
+	},
+	{
+		name		=> 'AuthEnvDenyAll',
+		args_how	=> Apache2::Const::NO_ARGS,
+		errmsg		=> 'AuthEnvDenyAll',
+	},
+	{
+		name		=> 'AuthEnvAllowFile',
+		args_how	=> Apache2::Const::TAKE1,
+		errmsg		=> 'AuthEnvAllowFile <file>',
+	},
+	{
+		name		=> 'AuthEnvDenyFile',
+		args_how	=> Apache2::Const::TAKE1,
+		errmsg		=> 'AuthEnvDenyFile <file>',
+	},
+	{
 		name		=> 'AuthEnvSet',
 		args_how	=> Apache2::Const::TAKE2,
 		errmsg		=> 'AuthEnvSet EnvVar Format',
@@ -356,9 +419,9 @@ sub AuthEnvUser
 	]);
 
 	# Check that the format contains something to expand.
-	unless ($fmt =~ /%{\w+(:\w*)?}/)
+	unless ($fmt =~ /%\{.*\}/)
 	{
-		$r->server->log_error("AuthEnvUser format has no expansion! AuthEnv cancelled for ", $r->uri);
+		$r->server->log_error("AuthEnvUser format '$fmt' has no expansion! AuthEnv cancelled for ", $r->uri);
 		return Apache2::Const::HTTP_FORBIDDEN;
 	}
 
@@ -380,6 +443,18 @@ sub AuthEnvVar { AuthEnvUser(@_); }
 #	if it's an allow rule (1) or deny (0).
 #	if it's an exact (1) or a match rule (0).
 #	the string to compare/match it against.
+
+sub AuthEnvAllowAll
+{
+	my ($cfg, $parms) = @_;
+	push @{$cfg->{authorise}}, ['', 1, 1, undef, ''];
+}
+
+sub AuthEnvDenyAll
+{
+	my ($cfg, $parms) = @_;
+	push @{$cfg->{authorise}}, ['', 0, 1, undef, ''];
+}
 
 sub AuthEnvAllowUser
 {
@@ -439,6 +514,59 @@ sub AuthEnvDenySplitMatch
 {
 	my ($cfg, $parms, $var, $split, $regex) = @_;
 	push @{$cfg->{authorise}}, [$var, 0, 0, $split, $regex];
+}
+
+sub AuthEnvAllowFile
+{
+	my ($cfg, $parms, $file) = @_;
+
+	local *FILE;
+	unless (open (FILE, '<', $file))
+	{
+		warn "AuthEnv: Cannot read access allow file '$file' ($!).\n";
+		return;
+	}
+
+	local ($/) = undef; # slurp.
+	my $users = <FILE>;
+	$users =~ s/#.*$//gm;
+	
+	for my $user (split/\s+/, $users)
+	{
+		next unless ($user ne '');
+		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 1, 1, undef, $user];
+	}
+
+	close FILE;
+}
+
+sub AuthEnvDenyFile
+{
+	my ($cfg, $parms, $file) = @_;
+
+	local *FILE;
+	unless (open (FILE, '<', $file))
+	{
+		warn "AuthEnv: Cannot read access deny file '$file' ($!).\n";
+		warn "AuthEnv: Denying all!\n";
+
+		# deny all from this point; just in case.
+		&AuthEnvDenyAll($cfg, $parms);
+
+		return;
+	}
+
+	local ($/) = undef; # slurp.
+	my $users = <FILE>;
+	$users =~ s/#.*$//gm;
+	
+	for my $user (split /\s+/s, $users)
+	{
+		next unless ($user ne '');
+		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 0, 1, undef, $user];
+	}
+
+	close FILE;
 }
 
 sub AuthEnvSet
@@ -510,6 +638,45 @@ sub DIR_MERGE    { merge(@_) }
 sub SERVER_MERGE { merge(@_) }
 
 
+# Fill out a sub-format with the correct values.
+# Take a context ($r), a format of environment variables (with optional default) and 
+# a fail reference.
+# Return the value of the first environment variable that exists, or the default if specified
+# or '' and increament tehe failure variable reference.
+sub fillout
+{
+	my ($r, $fmt, $fail) = @_;
+
+	# check the format
+	#unless ($fmt =~ /^[\w\|]+(:\w+)?$/)
+	#{
+		# wrong format.
+ 		#$$fail++;
+		#$r->server->log_error("Invalid expansion '$fmt' at ", $r->uri);
+		#return '';
+	#}
+
+	#$r->server->log_error("Expanding '$fmt' at ", $r->uri);
+
+	# Isolate the default value.
+	my $default = ($fmt =~ s/:(\w+)$//) ? $1 : undef;
+
+	# Run though each environment valriable in turn.
+	for my $e (split(/\|/, $fmt))
+	{
+		# return value if it exists.
+		return $r->subprocess_env($e) if defined($r->subprocess_env($e));
+	}
+
+	# Otherwise return the default value.
+	return $default if defined $default;
+
+	# Failed.
+ 	$$fail++;
+
+	'';
+}
+
 ###########################################################
 
 # NB There is almost no environment to speak of at this time!
@@ -561,14 +728,7 @@ sub authenticate
 
 			#$r->server->log_error($r->uri, ": change '$f'");
 
-			#$f =~ s/%{(\w+)}/$r->subprocess_env($1)/gxe;
-			#$f =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ($fail++))/gxe;
-			#$f =~ s/%{(\w+:(\w+))}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $2)/gxe;
-			$f =~ s/%{(\w+)(:(\w*))?}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ( defined($3) ? $3 : ($fail++)))/gxe;
-			#$r->server->log_error($r->uri, ": 1='$1'");
-			#$r->server->log_error($r->uri, ": 2='$2'");
-			#$r->server->log_error($r->uri, ": 3='$3'");
-			#$r->server->log_error($r->uri, ": to     '$f'");
+			$f =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 
 			# something wasn't defined.
 			return Apache2::Const::HTTP_UNAUTHORIZED if $fail;
@@ -627,8 +787,7 @@ sub allowed
 		my $fail = 0; # count non-existant variables.
 
 		# Substitute.
-		#$val =~ s/%{(\w+)}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : $fail++)/gxe;
-		$val =~ s/%{(\w+)(:(\w*))?}/(defined($r->subprocess_env($1)) ? $r->subprocess_env($1) : ( defined($3) ? $3 : ($fail++)))/gxe;
+		$val =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 
 		# Fail if this contains a non-existant environment variable.
 		return 0 if $fail;

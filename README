@@ -1,4 +1,4 @@
-Apache2::AuthEnv VERSION 1.0 - mod_perl2 authentication and
+Apache2::AuthEnv VERSION 1.3 - mod_perl2 authentication and
         authorisation control for Apache using only environment
         variables.
 
@@ -12,7 +12,7 @@ mod_perl2 but is actually useful. It could also be used as a framework
 to build other mod_perl2 modules.
 
 COPYRIGHT
-Copyright (c) 2007-2008 Anthony Fletcher. All rights reserved. These
+Copyright (c) 2007-2009 Anthony Fletcher. All rights reserved. These
 modules are free software; you can redistribute them and/or modify them
 under the same terms as Perl itself.
 
