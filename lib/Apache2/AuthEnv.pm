@@ -264,7 +264,7 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.3';
+$VERSION = '1.3.1';
 
 use Carp;
 use Data::Dumper;
@@ -659,7 +659,7 @@ sub fillout
 	#$r->server->log_error("Expanding '$fmt' at ", $r->uri);
 
 	# Isolate the default value.
-	my $default = ($fmt =~ s/:(\w+)$//) ? $1 : undef;
+	my $default = ($fmt =~ s/:(\w*)$//) ? $1 : undef;
 
 	# Run though each environment valriable in turn.
 	for my $e (split(/\|/, $fmt))

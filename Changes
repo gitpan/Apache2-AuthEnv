@@ -1,5 +1,10 @@
 Revision history for Perl extension Apache2::AuthEnv
 
+1.3.1 June 2009
+        Fixed a bug in the environment expansion whereby a final
+        empty default is ignored and mangles the last environment
+        variable name.
+
 1.3 April 2009
 	- Re-engineered the expansion to allow for
 		%{VAR1|VAR2|VAR3:default}
