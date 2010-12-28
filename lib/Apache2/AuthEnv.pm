@@ -14,6 +14,9 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  # Set the remote user and trigger the auth* stages
  AuthEnvUser %{REMOTE_ADDR}@%{SOME_ENV_VAR}
 
+ # turn on logging
+ AuthEnvLogInfo On
+
  # Also possible is setting the remote user from a list 
  # of alternative environment variables or a default value.
  AuthEnvUser %{HTTP_XX_USER|HTTP_YY_USER:anon}
@@ -22,6 +25,9 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
  AuthEnvSet	HTTP_AE_SERVER	%{SERVER_ADDR:unknown}:%{SERVER_PORT:unknown}
  AuthEnvChange	HTTP_AE_SERVER	s/:/!/g
  AuthEnvChange	HTTP_AE_SERVER	tr/a-z/A-Z/
+
+ # Load environment settings from a DBM database.
+ AuthEnvDbImport   HTTP_EXTRA_ /etc/dbfile Key
 
  # Allow and Deny access based on environment.
  # The default is to deny access.
@@ -159,6 +165,12 @@ This turns on the authentication and authorisation stages and sets the
 format for the remote user name, which is filled in during
 authentication.
 
+=item * AuthEnvDbImport <prefix> <datebase-file> <key-format>
+
+This imports extra environment variables from a database for that
+particular value of the key-format. The database is created via the
+MLDBM and BerkeleyDB::Btree packages.
+
 =item * AuthEnvSet <variable> <format>
 
 This sets the specified environment variable using the sepcified format.
@@ -232,6 +244,11 @@ It is useful when an area needs to be temporarily denied but the rest of the con
 This directive sets the HTTP denial code returned to the
 browser if authorisation fails. The default is FORBIDDEN.
 
+=item * AuthEnvLogInfo	On|Off
+
+Turn on or off extra logging about which users are getting allowed or
+denied by various rules. The default is no logging to reduce log sizes.
+
 =back
 
 =head1 AUTHOR
@@ -264,12 +281,16 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.3.1';
+$VERSION = '1.3.4';
 
 use Carp;
 use Data::Dumper;
 
 use Safe;
+
+use BerkeleyDB;
+use MLDBM qw(BerkeleyDB::Btree);
+
 
 use ModPerl::Util;
 use Apache2::Module;
@@ -279,6 +300,7 @@ use Apache2::CmdParms ();
 use Apache2::ServerUtil;
 use Apache2::RequestUtil ();
 use Apache2::RequestRec;
+use Apache2::Directive ();
 use Apache2::Const -compile => qw(OK DECLINED NO_ARGS TAKE1 TAKE2 TAKE3
 			NOT_FOUND HTTP_FORBIDDEN HTTP_UNAUTHORIZED);
 
@@ -367,6 +389,12 @@ my @directives = (
 		args_how	=> Apache2::Const::TAKE1,
 		errmsg		=> 'AuthEnvDenyFile <file>',
 	},
+
+	{
+		name		=> 'AuthEnvDbImport',
+		args_how	=> Apache2::Const::TAKE3,
+		errmsg		=> 'AuthEnvDbImport EnvPrefix DB Key',
+	},
 	{
 		name		=> 'AuthEnvSet',
 		args_how	=> Apache2::Const::TAKE2,
@@ -382,7 +410,11 @@ my @directives = (
 		args_how	=> Apache2::Const::TAKE1,
 		errmsg		=> 'AuthEnvDenial <UNAUTHORISED|UNAUTHORIZED|NOT_FOUND|FORBIDDEN>'
 	},
-	
+	{
+		name		=> 'AuthEnvLogInfo',
+		args_how	=> Apache2::Const::TAKE1,
+		errmsg		=> 'AuthEnvLogInfo On/Off',
+	},
 );
 
 # Register the directives.
@@ -390,6 +422,9 @@ Apache2::Module::add(__PACKAGE__, \@directives);
 
 # Debugging only.
 sub debug { my $r = shift; $r->server->log_error(@_); }
+
+# Log information
+sub info { 1; }
 
 # Create an object; not used by mod_perl2
 sub new
@@ -447,83 +482,96 @@ sub AuthEnvVar { AuthEnvUser(@_); }
 sub AuthEnvAllowAll
 {
 	my ($cfg, $parms) = @_;
-	push @{$cfg->{authorise}}, ['', 1, 1, undef, ''];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, ['', 1, 1, undef, '', $line];
 }
 
 sub AuthEnvDenyAll
 {
 	my ($cfg, $parms) = @_;
-	push @{$cfg->{authorise}}, ['', 0, 1, undef, ''];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, ['', 0, 1, undef, '', $line];
 }
 
 sub AuthEnvAllowUser
 {
 	my ($cfg, $parms, $user) = @_;
-	push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 1, 1, undef, $user];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 1, 1, undef, $user, $line];
 }
 
 sub AuthEnvDenyUser
 {
 	my ($cfg, $parms, $user) = @_;
-	push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 0, 1, undef, $user];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 0, 1, undef, $user, $line];
 }
 
 sub AuthEnvAllow
 {
 	my ($cfg, $parms, $var, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 1, 1, undef, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 1, 1, undef, $regex, $line];
 }
 
 sub AuthEnvAllowMatch
 {
 	my ($cfg, $parms, $var, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 1, 0, undef, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 1, 0, undef, $regex, $line];
 }
 
 sub AuthEnvDeny
 {
 	my ($cfg, $parms, $var, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 0, 1, undef, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 0, 1, undef, $regex, $line];
 }
 
 sub AuthEnvDenyMatch
 {
 	my ($cfg, $parms, $var, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 0, 0, undef, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 0, 0, undef, $regex, $line];
 }
 
 sub AuthEnvAllowSplit
 {
 	my ($cfg, $parms, $var, $split, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 1, 1, $split, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 1, 1, $split, $regex, $line];
 }
 
 sub AuthEnvAllowSplitMatch
 {
 	my ($cfg, $parms, $var, $split, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 1, 0, $split, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 1, 0, $split, $regex, $line];
 }
 
 sub AuthEnvDenySplit
 {
 	my ($cfg, $parms, $var, $split, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 0, 1, $split, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 0, 1, $split, $regex, $line];
 }
 
 sub AuthEnvDenySplitMatch
 {
 	my ($cfg, $parms, $var, $split, $regex) = @_;
-	push @{$cfg->{authorise}}, [$var, 0, 0, $split, $regex];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{authorise}}, [$var, 0, 0, $split, $regex, $line];
 }
 
 sub AuthEnvAllowFile
 {
 	my ($cfg, $parms, $file) = @_;
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
 
 	local *FILE;
 	unless (open (FILE, '<', $file))
 	{
-		warn "AuthEnv: Cannot read access allow file '$file' ($!).\n";
+		warn "AuthEnvAllowFile: Cannot read access allow file '$file' ($!).\n";
 		return;
 	}
 
@@ -534,7 +582,7 @@ sub AuthEnvAllowFile
 	for my $user (split/\s+/, $users)
 	{
 		next unless ($user ne '');
-		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 1, 1, undef, $user];
+		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 1, 1, undef, $user, $line];
 	}
 
 	close FILE;
@@ -543,11 +591,12 @@ sub AuthEnvAllowFile
 sub AuthEnvDenyFile
 {
 	my ($cfg, $parms, $file) = @_;
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
 
 	local *FILE;
 	unless (open (FILE, '<', $file))
 	{
-		warn "AuthEnv: Cannot read access deny file '$file' ($!).\n";
+		warn "AuthEnvDenyFile: Cannot read access deny file '$file' ($!).\n";
 		warn "AuthEnv: Denying all!\n";
 
 		# deny all from this point; just in case.
@@ -563,22 +612,31 @@ sub AuthEnvDenyFile
 	for my $user (split /\s+/s, $users)
 	{
 		next unless ($user ne '');
-		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 0, 1, undef, $user];
+		push @{$cfg->{authorise}}, ['%{REMOTE_USER}', 0, 1, undef, $user, $line];
 	}
 
 	close FILE;
 }
 
+sub AuthEnvDbImport
+{
+	my ($cfg, $parms, $var, $db, $fmt) = @_;
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{set}}, ['dbimport', $var, $db, $fmt, $line];
+}
+
 sub AuthEnvSet
 {
 	my ($cfg, $parms, $var, $fmt) = @_;
-	push @{$cfg->{set}}, ['set', $var, $fmt];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{set}}, ['set', $var, $fmt, $line];
 }
 
 sub AuthEnvChange
 {
 	my ($cfg, $parms, $var, $change) = @_;
-	push @{$cfg->{set}}, ['change', $var, $change];
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+	push @{$cfg->{set}}, ['change', $var, $change, $line];
 }
 
 sub AuthEnvDenial
@@ -613,6 +671,16 @@ sub AuthEnvDenial
 	1;
 }
 
+# Turn on information logging to the log files.
+sub AuthEnvLogInfo
+{
+	my ($cfg, $parms, $onoff) = @_;
+
+	$cfg->{LogInfo} = ($onoff =~ /^on$/i);
+
+	1;
+}
+
 # Merge configuration objects together so the the various 
 # Apache config files override each other.
 sub merge
@@ -642,21 +710,12 @@ sub SERVER_MERGE { merge(@_) }
 # Take a context ($r), a format of environment variables (with optional default) and 
 # a fail reference.
 # Return the value of the first environment variable that exists, or the default if specified
-# or '' and increament tehe failure variable reference.
+# or '' and increament the failure variable reference.
 sub fillout
 {
 	my ($r, $fmt, $fail) = @_;
 
-	# check the format
-	#unless ($fmt =~ /^[\w\|]+(:\w+)?$/)
-	#{
-		# wrong format.
- 		#$$fail++;
-		#$r->server->log_error("Invalid expansion '$fmt' at ", $r->uri);
-		#return '';
-	#}
-
-	#$r->server->log_error("Expanding '$fmt' at ", $r->uri);
+	#$r->server->log_error("Expanding '$fmt' for URL ", $r->uri);
 
 	# Isolate the default value.
 	my $default = ($fmt =~ s/:(\w*)$//) ? $1 : undef;
@@ -670,6 +729,8 @@ sub fillout
 
 	# Otherwise return the default value.
 	return $default if defined $default;
+
+	info $r, "Failed to expand '$fmt' for URL ", $r->uri;
 
 	# Failed.
  	$$fail++;
@@ -704,6 +765,20 @@ sub authenticate
 		return Apache2::Const::HTTP_UNAUTHORIZED;
 	}
 
+	# set logging on or off.
+	if (exists $cfg->{LogInfo} && $cfg->{LogInfo})
+	{
+		# debug on
+		no warnings;
+		eval ' sub info { debug @_; }; ';
+	}
+	else
+	{
+		# debug off
+		no warnings;
+		eval ' sub info { 1; }; ';
+	}
+
 	# Import CGI environment.
 	$r->subprocess_env unless $r->is_perl_option_enabled('SetupEnv');
 
@@ -722,7 +797,37 @@ sub authenticate
 		my ($act, $v, $f) = @$s;
 
 		# Set an environment variable.
-		if ($act eq 'set')
+	
+		if ($act eq 'dbimport')
+		{
+			my ($act, $prefix, $file, $var) = @$s;
+			my $fail = 0; # count non-existant variables.
+			$var =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
+			next if $fail;
+			#$r->server->log_error("db key '$var' for URL ", $r->uri);
+
+			my $db = tie my %data,  'MLDBM', 
+				-Filename => $file, 
+				-Flags => DB_RDONLY,
+				;
+
+			unless ($db)
+			{
+				$r->server->log_error("can't read database '$file' failed ($!) ", $r->uri);
+				next;
+			}
+			#$r->server->log_error("db file '$file' for URL ", $r->uri);
+
+			next unless exists $data{$var};
+
+			my $user = $data{$var};
+			for my $k (keys %$user)
+			{
+				#$r->server->log_error("db env key '$k' for URL ", $r->uri);
+				$r->subprocess_env($prefix . uc($k), $user->{$k});
+			}
+		}
+		elsif ($act eq 'set')
 		{
 			my $fail = 0; # count non-existant variables.
 
@@ -777,20 +882,24 @@ sub allowed
 {
 	my ($r, @list) = @_;
 
-	#debug $r, 1+$#list, " authorise rules\n";
+	#info $r, 1+$#list, " authorise rules\n";
+
+	my $user = $r->user;
 
 	for my $a (@list)
 	{
 		# Each rule consists of 3 parts.
-		my ($val, $allow, $exact, $split, $regex) = @{$a};
+		my ($value, $allow, $exact, $split, $regex, $line) = @{$a};
 
 		my $fail = 0; # count non-existant variables.
 
 		# Substitute.
+		my $val = $value;
 		$val =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 
+		# CHANGE IN BEHAVIOUR!
 		# Fail if this contains a non-existant environment variable.
-		return 0 if $fail;
+		#return 0 if $fail;
 
 		#debug $r, "$val $exact $regex\n";
 
@@ -812,10 +921,16 @@ sub allowed
 			if ($match)
 			{
 				#debug $r, "match '$v' against '$regex' returns '$allow'\n";
+				#info $r, "Rule: match '$val' against '$regex' returns '$allow'\n";
+				info $r, "User $user ", ($allow ? 'allowed' : 'denied'), " by $line for URI ", $r->uri;
+
 				return $allow;
 			}
 		}
 	}
+
+	#$r->server->log_error("User denied by default for URI ", $r->uri);
+	info $r, "User $user denied by default for URI ", $r->uri;
 
 	0;
 }
@@ -849,7 +964,8 @@ sub authorise
 		return Apache2::Const::OK;
 
 	# Fail by default.
-	$r->server->log_error("User $user denied ", $r->uri);
+
+	#$r->server->log_error("User $user denied by default", $r->uri);
 
 	return $cfg->{Denial};
 
