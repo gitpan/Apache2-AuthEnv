@@ -1,5 +1,8 @@
 Revision history for Perl extension Apache2::AuthEnv
 
+1.3.5 January 2011
+	- Expand %{} in the regular expressions for AuthEnv.*Match
+
 1.3.4 December 2010
         - Change undefined ENV variable to empty strings. This will stop
           authorization denials due to undefined var. To disallow empty

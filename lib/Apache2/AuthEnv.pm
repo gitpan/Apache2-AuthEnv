@@ -1,5 +1,7 @@
 package Apache2::AuthEnv;
 
+$VERSION = '1.3.5';
+
 =head1 NAME
 
 Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variables.
@@ -8,7 +10,7 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
 
  ### In httpd.conf file (required to load the directives).
  PerlOptions +GlobalRequest
- PerlModule Apache2::AuthEnv
+ PerlLoadModule Apache2::AuthEnv
 
  ### In httpd.conf or .htaccess: ################
  # Set the remote user and trigger the auth* stages
@@ -153,7 +155,7 @@ In the Apache configuration file httpd.conf, the module must be loaded
 
 PerlOptions +GlobalRequest
 
-PerlModule Apache2::AuthEnv
+PerlLoadModule Apache2::AuthEnv
 
 =back
 
@@ -281,7 +283,6 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use vars qw($VERSION);
-$VERSION = '1.3.4';
 
 use Carp;
 use Data::Dumper;
@@ -896,6 +897,9 @@ sub allowed
 		# Substitute.
 		my $val = $value;
 		$val =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
+
+		# Substitute the regex as well.
+		$regex =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 
 		# CHANGE IN BEHAVIOUR!
 		# Fail if this contains a non-existant environment variable.
