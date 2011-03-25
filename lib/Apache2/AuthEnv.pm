@@ -1,6 +1,6 @@
 package Apache2::AuthEnv;
 
-$VERSION = '1.3.5';
+$VERSION = '1.3.6';
 
 =head1 NAME
 
@@ -165,7 +165,8 @@ PerlLoadModule Apache2::AuthEnv
 
 This turns on the authentication and authorisation stages and sets the
 format for the remote user name, which is filled in during
-authentication.
+authentication. This directive is allowed in exactly the same contexts as the
+Require directive.
 
 =item * AuthEnvDbImport <prefix> <datebase-file> <key-format>
 
@@ -422,7 +423,10 @@ my @directives = (
 Apache2::Module::add(__PACKAGE__, \@directives);
 
 # Debugging only.
-sub debug { my $r = shift; $r->server->log_error(@_); }
+#sub debug { my $r = shift; $r->server->log_error(@_); }
+sub debug { Apache2::ServerUtil->server->log_error(@_); }
+
+sub err { Apache2::ServerUtil->server->log_error(@_); }
 
 # Log information
 sub info { 1; }
@@ -439,26 +443,60 @@ sub new
 	$self;
 }
 
+###################### Directives ###########################################
+
 # Set the environment variable to use for authentication
 # and set the system to authenticate and authorise.
 sub AuthEnvUser
 {
 	my ($cfg, $parms, $fmt, @args) = @_;
 
-	# Force auth* stages to be done by loading the configuration.
-	my $r = Apache2::RequestUtil->request();
-	$r->add_config([
-		"PerlAuthenHandler Apache2::AuthEnv::authenticate",
-		"PerlAuthzHandler  Apache2::AuthEnv::authorise",
-		"Require valid-user",
-		"AuthType AuthEnv",
-	]);
+	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
 
 	# Check that the format contains something to expand.
+	# Warn if it's fixed.
 	unless ($fmt =~ /%\{.*\}/)
 	{
-		$r->server->log_error("AuthEnvUser format '$fmt' has no expansion! AuthEnv cancelled for ", $r->uri);
-		return Apache2::Const::HTTP_FORBIDDEN;
+		# NB the request object is not available when called in 
+		# global config files (eg httpd.conf).
+  		err("AuthEnvUser format '$fmt' has no expansion at $line");
+
+		#return Apache2::Const::HTTP_FORBIDDEN;
+	}
+
+	# Loading the configuration handles for auth*.
+	# This can be done anywhere.
+	eval {
+            $parms->add_config([
+		'PerlAuthenHandler Apache2::AuthEnv::authenticate',
+		'PerlAuthzHandler  Apache2::AuthEnv::authorise',
+	]);
+	}; die if ($@);
+
+	# Force auth* stages to be done by loading the configuration.
+	# May not be allowed in this part of the httpd conf files.
+	# So trap!
+	eval {
+		$parms->add_config([
+			'AuthType AuthEnv',
+			'Require valid-user',
+		]);
+	};
+
+	# Trap the error.
+	if ($@) {
+		if ($@ =~ /not allowed/i)
+		{
+			# Directive not allowed in this part of httpd configuration.
+  			err("AuthEnvUser not allowed here at $line");
+			die "AuthEnvUser not allowed here at $line\n";
+		}
+		else
+		{
+			# Unknown failure.
+  			err("AuthEnvUser: $@ at $line");
+			die ;
+		}
 	}
 
 	# Save value for user name format.
@@ -472,6 +510,7 @@ sub AuthEnvUser
 
 	1;
 }
+
 sub AuthEnvVar { AuthEnvUser(@_); }
 
 # The @authorise array contains arrays of four elements:
@@ -572,7 +611,7 @@ sub AuthEnvAllowFile
 	local *FILE;
 	unless (open (FILE, '<', $file))
 	{
-		warn "AuthEnvAllowFile: Cannot read access allow file '$file' ($!).\n";
+		err "AuthEnvAllowFile: Cannot read access allow file '$file' ($!) at $line.\n";
 		return;
 	}
 
@@ -597,8 +636,8 @@ sub AuthEnvDenyFile
 	local *FILE;
 	unless (open (FILE, '<', $file))
 	{
-		warn "AuthEnvDenyFile: Cannot read access deny file '$file' ($!).\n";
-		warn "AuthEnv: Denying all!\n";
+		err "AuthEnvDenyFile: Cannot read access deny file '$file' ($!) at $line.\n";
+		err "AuthEnv: Denying all!\n";
 
 		# deny all from this point; just in case.
 		&AuthEnvDenyAll($cfg, $parms);
@@ -658,10 +697,8 @@ sub AuthEnvDenial
 	}
 	else
 	{
-		my $r = Apache2::RequestUtil->request();
-
 		# warning to correct error log
-		$r->server->log_error("Invalid argument '$code' to AuthEnvDenial in ", $parms->path);
+		err("Invalid argument '$code' to AuthEnvDenial in ", $parms->path);
 
 		# Set a default.
 		$cfg->{Denial} = Apache2::Const::HTTP_FORBIDDEN;
@@ -681,6 +718,8 @@ sub AuthEnvLogInfo
 
 	1;
 }
+
+###################### End of directives #####################################
 
 # Merge configuration objects together so the the various 
 # Apache config files override each other.
@@ -716,7 +755,7 @@ sub fillout
 {
 	my ($r, $fmt, $fail) = @_;
 
-	#$r->server->log_error("Expanding '$fmt' for URL ", $r->uri);
+	#debug("Expanding '$fmt' for URL ", $r->uri);
 
 	# Isolate the default value.
 	my $default = ($fmt =~ s/:(\w*)$//) ? $1 : undef;
@@ -731,7 +770,7 @@ sub fillout
 	# Otherwise return the default value.
 	return $default if defined $default;
 
-	info $r, "Failed to expand '$fmt' for URL ", $r->uri;
+	info "Failed to expand '$fmt' for URL ", $r->uri;
 
 	# Failed.
  	$$fail++;
@@ -757,12 +796,12 @@ sub authenticate
 	my $type = __PACKAGE__; $type =~ s/^.*:://;
 	if ($r->auth_type ne $type)
 	{
-		$r->server->log_error("Wrong authentication Type ", $r->auth_type);
+		err("Wrong authentication Type ", $r->auth_type);
 		return Apache2::Const::HTTP_UNAUTHORIZED;
 	}
 	unless (defined $cfg->{AuthEnvUser})
 	{
-		$r->server->log_error("AuthEnvUser not used! ", $r->auth_type);
+		err("AuthEnvUser not used! ", $r->auth_type);
 		return Apache2::Const::HTTP_UNAUTHORIZED;
 	}
 
@@ -805,7 +844,7 @@ sub authenticate
 			my $fail = 0; # count non-existant variables.
 			$var =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 			next if $fail;
-			#$r->server->log_error("db key '$var' for URL ", $r->uri);
+			#debug("db key '$var' for URL ", $r->uri);
 
 			my $db = tie my %data,  'MLDBM', 
 				-Filename => $file, 
@@ -814,17 +853,17 @@ sub authenticate
 
 			unless ($db)
 			{
-				$r->server->log_error("can't read database '$file' failed ($!) ", $r->uri);
+				err("can't read database '$file' failed ($!) ", $r->uri);
 				next;
 			}
-			#$r->server->log_error("db file '$file' for URL ", $r->uri);
+			#debug("db file '$file' for URL ", $r->uri);
 
 			next unless exists $data{$var};
 
 			my $user = $data{$var};
 			for my $k (keys %$user)
 			{
-				#$r->server->log_error("db env key '$k' for URL ", $r->uri);
+				#debug("db env key '$k' for URL ", $r->uri);
 				$r->subprocess_env($prefix . uc($k), $user->{$k});
 			}
 		}
@@ -832,7 +871,7 @@ sub authenticate
 		{
 			my $fail = 0; # count non-existant variables.
 
-			#$r->server->log_error($r->uri, ": change '$f'");
+			#debug($r->uri, ": change '$f'");
 
 			$f =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 
@@ -854,7 +893,7 @@ sub authenticate
 			if ($@)
 			{
 				# failure to run.
-				$r->server->log_error("change '$f' failed ($@) ", $r->uri);
+				err("change '$f' failed ($@) ", $r->uri);
 				return Apache2::Const::HTTP_UNAUTHORIZED;
 			}
 			else
@@ -883,7 +922,7 @@ sub allowed
 {
 	my ($r, @list) = @_;
 
-	#info $r, 1+$#list, " authorise rules\n";
+	#info 1+$#list, " authorise rules\n";
 
 	my $user = $r->user;
 
@@ -905,7 +944,7 @@ sub allowed
 		# Fail if this contains a non-existant environment variable.
 		#return 0 if $fail;
 
-		#debug $r, "$val $exact $regex\n";
+		#debug "$val $exact $regex\n";
 
 		# Split the value up if required.
 		my @parts = (defined $split) ? split(/$split/, $val) : $val;
@@ -924,17 +963,16 @@ sub allowed
 			#return $allow if $match;
 			if ($match)
 			{
-				#debug $r, "match '$v' against '$regex' returns '$allow'\n";
-				#info $r, "Rule: match '$val' against '$regex' returns '$allow'\n";
-				info $r, "User $user ", ($allow ? 'allowed' : 'denied'), " by $line for URI ", $r->uri;
+				#debug "match '$v' against '$regex' returns '$allow'\n";
+				#info "Rule: match '$val' against '$regex' returns '$allow'\n";
+				info "User $user ", ($allow ? 'allowed' : 'denied'), " by $line for URI ", $r->uri;
 
 				return $allow;
 			}
 		}
 	}
 
-	#$r->server->log_error("User denied by default for URI ", $r->uri);
-	info $r, "User $user denied by default for URI ", $r->uri;
+	info "User $user denied by default for URI ", $r->uri;
 
 	0;
 }
@@ -947,7 +985,7 @@ sub authorise
 	# recover configuration.
         my $cfg = Apache2::Module::get_config(__PACKAGE__, $r->server, $r->per_dir_config);
 
-	#debug $r, "$#authorise authorise rules\n";
+	#debug "$#authorise authorise rules\n";
 
 	# default denial code.
 	$cfg->{Denial} ||= Apache2::Const::HTTP_FORBIDDEN;
@@ -959,7 +997,7 @@ sub authorise
 	my $user = $r->user;
 	unless ($user)
 	{
-		$r->server->log_error("No authenticated user ", $r->uri);
+		err("No authenticated user ", $r->uri);
 		return $cfg->{Denial};
 	} 
 
@@ -969,7 +1007,7 @@ sub authorise
 
 	# Fail by default.
 
-	#$r->server->log_error("User $user denied by default", $r->uri);
+	#err("User $user denied by default", $r->uri);
 
 	return $cfg->{Denial};
 
@@ -991,7 +1029,7 @@ sub handler
 	if ($phase eq 'PerlAuthzHandler')  { return authorise(@_); }
 
 	# This phase is not handled by this module.
-	$r->server->log_error("Handler called in wrong phase ($phase)!");
+	err("Handler called in wrong phase ($phase)!");
 
 	return Apache2::Const::HTTP_FORBIDDEN;
 }

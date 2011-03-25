@@ -3,7 +3,10 @@ use ExtUtils::MakeMaker;
 WriteMakefile (
 	NAME		=> 'Apache2::AuthEnv',
 	VERSION_FROM	=> 'lib/Apache2/AuthEnv.pm',
+	ABSTRACT_FROM	=> 'lib/Apache2/AuthEnv.pm',
 	DISTNAME	=> "Apache2-AuthEnv",
+	AUTHOR		=> 'Anthony Fletcher',
+	LICENSE		=> 'perl',
 	dist		=> {COMPRESS => 'gzip', SUFFIX => 'gz'},
 
 	PREREQ_PM  => {

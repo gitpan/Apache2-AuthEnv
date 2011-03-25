@@ -1,5 +1,12 @@
 Revision history for Perl extension Apache2::AuthEnv
 
+1.3.6 March 2011
+        - Fix bug that disallowed directives to be specified in
+          httpd.conf files. Reported by John Ostuni, Giovanni Torres,
+          NIH/NINDS)
+
+	- Allow fixed user names but still issue warning.
+
 1.3.5 January 2011
 	- Expand %{} in the regular expressions for AuthEnv.*Match
 
