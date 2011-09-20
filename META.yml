@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Apache2-AuthEnv
-version:            1.3.6
+version:            v1.3.8
 abstract:           Perl Authentication and Authorisation via Environment Variables.
 author:
     - Anthony Fletcher
@@ -18,10 +18,16 @@ requires:
     Apache2::RequestRec:  1
     Apache2::RequestUtil:  1
     Apache2::ServerUtil:  1
+    BerkeleyDB:           0.32
     Carp:                 1
     Data::Dumper:         1
+    Memoize:              1
+    Memoize::Expire:      1
+    MLDBM:                1
     mod_perl2:            2
     ModPerl::Util:        1
+    Safe:                 1
+    Storable:             1
 no_index:
     directory:
         - t

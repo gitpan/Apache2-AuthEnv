@@ -1,5 +1,19 @@
 Revision history for Perl extension Apache2::AuthEnv
 
+1.3.8 April 2011
+        - Use Memoize to cache the database file lookup, to speed access
+          on subsequence requests.
+
+1.3.7 March 2011
+        - Set verion number to v1.3.7 as this allows CPAN to update the
+          module correctly.
+	- Incorporate Apache2::ServerRec::warn for logging.
+        - Add AuthEnvLogDebug directive for debugging.
+        - Restrict AuthEnvUser and AuthEnvVar to directory, location and
+          .htaccess files only.
+	- Deal with taint checks.
+	- No longer need "PerlOptions +GlobalRequest" in perl.conf
+
 1.3.6 March 2011
         - Fix bug that disallowed directives to be specified in
           httpd.conf files. Reported by John Ostuni, Giovanni Torres,

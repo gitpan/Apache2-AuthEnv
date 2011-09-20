@@ -21,7 +21,13 @@ WriteMakefile (
 		'Apache2::RequestUtil'	=> 1,
 		'Apache2::RequestRec'	=> 1,
 		'Apache2::Const'	=> 1,
-		},
+		'Memoize'		=> 1,
+		'Memoize::Expire'	=> 1,
+		'Safe'			=> 1,
+		'Storable'		=> 1,
+		'MLDBM'			=> 1,
+		'BerkeleyDB'		=> 0.32,
+	},
 
 );
 

@@ -1,6 +1,6 @@
 package Apache2::AuthEnv;
 
-$VERSION = '1.3.6';
+$VERSION = 'v1.3.8';
 
 =head1 NAME
 
@@ -9,7 +9,6 @@ Apache2::AuthEnv - Perl Authentication and Authorisation via Environment Variabl
 =head1 SYNOPSIS
 
  ### In httpd.conf file (required to load the directives).
- PerlOptions +GlobalRequest
  PerlLoadModule Apache2::AuthEnv
 
  ### In httpd.conf or .htaccess: ################
@@ -153,11 +152,12 @@ In the Apache configuration file httpd.conf, the module must be loaded
 
 =over 2
 
-PerlOptions +GlobalRequest
-
 PerlLoadModule Apache2::AuthEnv
 
 =back
+
+PerlLoadModule, rather than PerlModule, is required to load this module
+as it implements new Apache directives.
 
 =over 4
 
@@ -165,7 +165,9 @@ PerlLoadModule Apache2::AuthEnv
 
 This turns on the authentication and authorisation stages and sets the
 format for the remote user name, which is filled in during
-authentication. This directive is allowed in exactly the same contexts as the
+authentication. Any prior authorisation lists are cleared.
+
+This directive is allowed in exactly the same contexts as the
 Require directive.
 
 =item * AuthEnvDbImport <prefix> <datebase-file> <key-format>
@@ -289,10 +291,12 @@ use Carp;
 use Data::Dumper;
 
 use Safe;
+use Memoize;
+use Memoize::Expire;
+use Storable  qw(freeze thaw dclone);
 
 use BerkeleyDB;
 use MLDBM qw(BerkeleyDB::Btree);
-
 
 use ModPerl::Util;
 use Apache2::Module;
@@ -300,11 +304,14 @@ use Apache2::Access ();
 use Apache2::Log;
 use Apache2::CmdParms ();
 use Apache2::ServerUtil;
+use Apache2::ServerRec qw(warn);
 use Apache2::RequestUtil ();
 use Apache2::RequestRec;
 use Apache2::Directive ();
-use Apache2::Const -compile => qw(OK DECLINED NO_ARGS TAKE1 TAKE2 TAKE3
-			NOT_FOUND HTTP_FORBIDDEN HTTP_UNAUTHORIZED);
+use Apache2::Const -compile => qw(OK DECLINED NO_ARGS TAKE1 TAKE2 TAKE3 FLAG
+			NOT_FOUND HTTP_FORBIDDEN HTTP_UNAUTHORIZED
+			:override
+		);
 
 die "The module mod_perl 2.0 is required!" unless
 	( exists $ENV{MOD_PERL_API_VERSION} and 
@@ -316,10 +323,12 @@ my @directives = (
 	{
 		name	=> 'AuthEnvUser',
 		errmsg	=> 'AuthEnvUser EnvVarFrormat',
+		req_override => Apache2::Const::OR_AUTHCFG, # only allow where Require is allowed.
 	},
 	{
 		name	=> 'AuthEnvVar',
 		errmsg	=> 'AuthEnvVar EnvVarFrormat',
+		req_override => Apache2::Const::OR_AUTHCFG, # only allow where Require is allowed.
 	},
 	{
 		name		=> 'AuthEnvAllowUser',
@@ -414,7 +423,12 @@ my @directives = (
 	},
 	{
 		name		=> 'AuthEnvLogInfo',
-		args_how	=> Apache2::Const::TAKE1,
+		args_how	=> Apache2::Const::FLAG,
+		errmsg		=> 'AuthEnvLogInfo On/Off',
+	},
+	{
+		name		=> 'AuthEnvLogDebug',
+		args_how	=> Apache2::Const::FLAG,
 		errmsg		=> 'AuthEnvLogInfo On/Off',
 	},
 );
@@ -423,10 +437,10 @@ my @directives = (
 Apache2::Module::add(__PACKAGE__, \@directives);
 
 # Debugging only.
-#sub debug { my $r = shift; $r->server->log_error(@_); }
-sub debug { Apache2::ServerUtil->server->log_error(@_); }
+sub debug { 1; }
 
-sub err { Apache2::ServerUtil->server->log_error(@_); }
+# errors.
+sub err { warn @_; }
 
 # Log information
 sub info { 1; }
@@ -465,13 +479,14 @@ sub AuthEnvUser
 	}
 
 	# Loading the configuration handles for auth*.
-	# This can be done anywhere.
+	# This can be done anywhere so there shouldnever be a problem.
 	eval {
             $parms->add_config([
 		'PerlAuthenHandler Apache2::AuthEnv::authenticate',
 		'PerlAuthzHandler  Apache2::AuthEnv::authorise',
 	]);
-	}; die if ($@);
+	};
+ 	warn "$line: $@" if ($@);
 
 	# Force auth* stages to be done by loading the configuration.
 	# May not be allowed in this part of the httpd conf files.
@@ -483,20 +498,22 @@ sub AuthEnvUser
 		]);
 	};
 
+	# Should never be a problem because the directive is 
+	# restricted to location, directory and .htaccess only.
 	# Trap the error.
 	if ($@) {
 		if ($@ =~ /not allowed/i)
 		{
 			# Directive not allowed in this part of httpd configuration.
-  			err("AuthEnvUser not allowed here at $line");
-			die "AuthEnvUser not allowed here at $line\n";
+  			warn "AuthEnvUser not allowed here at $line";
 		}
 		else
 		{
 			# Unknown failure.
-  			err("AuthEnvUser: $@ at $line");
-			die ;
+  			warn "AuthEnvUser: $@ at $line";
 		}
+
+		exit 2;
 	}
 
 	# Save value for user name format.
@@ -662,6 +679,18 @@ sub AuthEnvDbImport
 {
 	my ($cfg, $parms, $var, $db, $fmt) = @_;
 	my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+
+	# Check file is valid - i.e. exists and readable.
+	unless ( -r $db )
+	{
+		#warn "DB file is '$db'.\n";
+		warn "Cannot read database file at $line.\n";
+		return 0;
+	}
+
+	# Untaint as file exists.
+	$db = $1 if ($db =~ /^(.*)$/);
+
 	push @{$cfg->{set}}, ['dbimport', $var, $db, $fmt, $line];
 }
 
@@ -697,8 +726,9 @@ sub AuthEnvDenial
 	}
 	else
 	{
-		# warning to correct error log
-		err("Invalid argument '$code' to AuthEnvDenial in ", $parms->path);
+		# warning of bad denial code.
+		my $line = join(':', $parms->directive->filename, $parms->directive->line_num);
+		warn "Invalid argument to AuthEnvDenial at $line";
 
 		# Set a default.
 		$cfg->{Denial} = Apache2::Const::HTTP_FORBIDDEN;
@@ -714,7 +744,17 @@ sub AuthEnvLogInfo
 {
 	my ($cfg, $parms, $onoff) = @_;
 
-	$cfg->{LogInfo} = ($onoff =~ /^on$/i);
+	$cfg->{LogInfo} = $onoff;
+
+	1;
+}
+
+# Turn on or off debugging; unpublished.
+sub AuthEnvLogDebug
+{
+	my ($cfg, $parms, $onoff) = @_;
+
+	$cfg->{LogDebug} = $onoff;
 
 	1;
 }
@@ -755,7 +795,7 @@ sub fillout
 {
 	my ($r, $fmt, $fail) = @_;
 
-	#debug("Expanding '$fmt' for URL ", $r->uri);
+	debug("Expanding '$fmt' for URL ", $r->uri);
 
 	# Isolate the default value.
 	my $default = ($fmt =~ s/:(\w*)$//) ? $1 : undef;
@@ -776,6 +816,51 @@ sub fillout
  	$$fail++;
 
 	'';
+}
+
+# Look a key up in the MLDBM database, with a function that can be cached.
+sub dblookup2
+{
+	my ($file, $var) = @_;
+	##warn("db key '$var' in file '$file'");
+
+	my $null = freeze {};
+
+	return $null unless defined $file;
+
+	my $db = tie my %data,  'MLDBM', 
+		-Filename => $file, 
+		-Flags => DB_RDONLY,
+	;
+
+	unless ($db)
+	{
+		err("Cannot read database '$file' failed ($!) ");
+		return $null;
+	}
+
+	# Side step any taint issues.
+	# The datbase is a valid file.
+	$db->RemoveTaint(1);
+
+	# Return nothing if there is no entry.
+	return $null unless exists $data{$var};
+
+	# Return frozen data.
+	freeze $data{$var};
+}
+
+# Wrap the lookup function.
+tie my %mcache => 'Memoize::Expire',
+        LIFETIME => 5,    # In seconds
+;
+memoize 'dblookup2', SCALAR_CACHE => [HASH => \%mcache ], LIST_CACHE => 'FAULT', ;
+
+# This is a wrapper to manage the unthawing process correctly.
+sub dblookup
+{
+	my $user = dblookup2(@_);
+	$user = thaw $user;
 }
 
 ###########################################################
@@ -808,15 +893,29 @@ sub authenticate
 	# set logging on or off.
 	if (exists $cfg->{LogInfo} && $cfg->{LogInfo})
 	{
-		# debug on
+		# info on
 		no warnings;
-		eval ' sub info { debug @_; }; ';
+		eval 'sub info { warn @_; };';
 	}
 	else
 	{
-		# debug off
+		# info off
 		no warnings;
-		eval ' sub info { 1; }; ';
+		eval 'sub info { 1; };';
+	}
+	
+	# set debugging on or off.
+	if (exists $cfg->{LogDebug} && $cfg->{LogDebug})
+	{
+		# debug on
+		no warnings;
+		eval 'sub debug { warn @_; };';
+	}
+	else
+	{
+		# info off
+		no warnings;
+		eval 'sub debug { 1; };';
 	}
 
 	# Import CGI environment.
@@ -844,26 +943,14 @@ sub authenticate
 			my $fail = 0; # count non-existant variables.
 			$var =~ s/%\{([^\}]+)\}/&fillout($r, $1, \$fail)/gxe;
 			next if $fail;
-			#debug("db key '$var' for URL ", $r->uri);
 
-			my $db = tie my %data,  'MLDBM', 
-				-Filename => $file, 
-				-Flags => DB_RDONLY,
-				;
+			# Load user data.
+			my $user = dblookup($file, $var);
 
-			unless ($db)
-			{
-				err("can't read database '$file' failed ($!) ", $r->uri);
-				next;
-			}
-			#debug("db file '$file' for URL ", $r->uri);
-
-			next unless exists $data{$var};
-
-			my $user = $data{$var};
+			# Load the environment.
 			for my $k (keys %$user)
 			{
-				#debug("db env key '$k' for URL ", $r->uri);
+				debug("db env key '$k' for URL ", $r->uri);
 				$r->subprocess_env($prefix . uc($k), $user->{$k});
 			}
 		}
